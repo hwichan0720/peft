@@ -69,7 +69,11 @@ def prepare_model_for_int8_training(
 
     if hasattr(model, output_embedding_layer_name):
         output_embedding_layer = getattr(model, output_embedding_layer_name)
-        input_dtype = output_embedding_layer.weight.dtype
+
+        if "MaskedLM" in model.config.architectures[0]:
+            input_dtype = output_embedding_layer.decoder.weight.dtype
+        else:
+            input_dtype = output_embedding_layer.weight.dtype
 
         class CastOutputToFloat(torch.nn.Sequential):
             r"""
