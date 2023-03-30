@@ -288,11 +288,61 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         except AttributeError:
             return getattr(self.base_model, name)
 
-    def forward(self, *args, **kwargs):
-        """
-        Forward pass of the model.
-        """
-        return self.get_base_model()(*args, **kwargs)
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        **kwargs,
+    ):
+        if isinstance(self.peft_config, PromptLearningConfig):
+
+            batch_size = input_ids.shape[0]
+            if attention_mask is not None:
+                # concat prompt attention mask
+                prefix_attention_mask = torch.ones(batch_size, self.peft_config.num_virtual_tokens).to(self.device)
+                attention_mask = torch.cat((prefix_attention_mask, attention_mask), dim=1)
+
+            if kwargs.get("position_ids", None) is not None:
+                warnings.warn("Position ids are not supported for parameter efficient tuning. Ignoring position ids.")
+                kwargs["position_ids"] = None
+            if kwargs.get("token_type_ids", None) is not None:
+                warnings.warn(
+                    "Token type ids are not supported for parameter efficient tuning. Ignoring token type ids"
+                )
+                kwargs["token_type_ids"] = None
+            kwargs.update(
+                {
+                    "attention_mask": attention_mask,
+                    "labels": labels,
+                    "output_attentions": output_attentions,
+                    "output_hidden_states": output_hidden_states,
+                    "return_dict": return_dict,
+                }
+            )
+
+            if self.peft_config.peft_type == PeftType.PREFIX_TUNING:
+                past_key_values = self.get_prompt(batch_size)
+                return self.base_model(input_ids=input_ids, past_key_values=past_key_values, **kwargs)
+            else:
+                if inputs_embeds is None:
+                    inputs_embeds = self.word_embeddings(input_ids)
+                # concat prompt labels
+                if labels is not None:
+                    prefix_labels = torch.full((batch_size, self.peft_config.num_virtual_tokens), -100).to(self.device)
+                    labels = torch.cat((prefix_labels, labels), dim=1)
+                    kwargs["labels"] = labels
+                prompts = self.get_prompt(batch_size=batch_size)
+                prompts = prompts.to(inputs_embeds.dtype)
+                inputs_embeds = torch.cat((prompts, inputs_embeds), dim=1)
+                outputs = self.base_model(
+                    inputs_embeds=inputs_embeds, labels=labels, attention_mask=attention_mask, **kwargs
+                )
+                return outputs
 
     @contextmanager
     def disable_adapter(self):
