@@ -26,6 +26,7 @@ from ..utils import PeftType, PromptLearningConfig
 class PromptTuningInit(str, enum.Enum):
     TEXT = "TEXT"
     RANDOM = "RANDOM"
+    FIRST = "FIRST"
 
 
 @dataclass
@@ -42,7 +43,7 @@ class PromptTuningConfig(PromptLearningConfig):
     """
 
     prompt_tuning_init: Union[PromptTuningInit, str] = field(
-        default=PromptTuningInit.RANDOM,
+        default=PromptTuningInit.FIRST,
         metadata={"help": "How to initialize the prompt tuning parameters"},
     )
     prompt_tuning_init_text: Optional[str] = field(
@@ -110,6 +111,13 @@ class PromptEmbedding(torch.nn.Module):
                 init_token_ids = init_token_ids * num_reps
             init_token_ids = init_token_ids[:total_virtual_tokens]
 
+            word_embedding_weights = word_embeddings(torch.LongTensor(init_token_ids)).detach().clone()
+            word_embedding_weights = word_embedding_weights.to(torch.float32)
+            self.embedding.weight = torch.nn.Parameter(word_embedding_weights)
+
+        # initialize prompt embedding with first n vocabulary
+        elif config.prompt_tuning_init == PromptTuningInit.FIRST:
+            init_token_ids = [i for i in range(total_virtual_tokens)]
             word_embedding_weights = word_embeddings(torch.LongTensor(init_token_ids)).detach().clone()
             word_embedding_weights = word_embedding_weights.to(torch.float32)
             self.embedding.weight = torch.nn.Parameter(word_embedding_weights)
