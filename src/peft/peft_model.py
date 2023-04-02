@@ -20,27 +20,21 @@ from contextlib import contextmanager
 
 import torch
 from accelerate import dispatch_model, infer_auto_device_map
-from accelerate.hooks import AlignDevicesHook, add_hook_to_module, remove_hook_from_submodules
+from accelerate.hooks import (AlignDevicesHook, add_hook_to_module,
+                              remove_hook_from_submodules)
 from accelerate.utils import get_balanced_memory
 from huggingface_hub import hf_hub_download
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers import PreTrainedModel
-from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
+from transformers.modeling_outputs import (SequenceClassifierOutput,
+                                           TokenClassifierOutput)
 from transformers.utils import PushToHubMixin
 
 from .tuners import LoraModel, PrefixEncoder, PromptEmbedding, PromptEncoder
-from .utils import (
-    TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,
-    WEIGHTS_NAME,
-    PeftConfig,
-    PeftType,
-    PromptLearningConfig,
-    TaskType,
-    _set_trainable,
-    get_peft_model_state_dict,
-    set_peft_model_state_dict,
-    shift_tokens_right,
-)
+from .utils import (TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,
+                    WEIGHTS_NAME, PeftConfig, PeftType, PromptLearningConfig,
+                    TaskType, _set_trainable, get_peft_model_state_dict,
+                    set_peft_model_state_dict, shift_tokens_right)
 
 
 class PeftModel(PushToHubMixin, torch.nn.Module):
@@ -129,7 +123,8 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                     - A path to a directory containing a Lora configuration file saved using the
                         `save_pretrained` method, e.g., ``./my_lora_config_directory/``.
         """
-        from .mapping import MODEL_TYPE_TO_PEFT_MODEL_MAPPING, PEFT_TYPE_TO_CONFIG_MAPPING
+        from .mapping import (MODEL_TYPE_TO_PEFT_MODEL_MAPPING,
+                              PEFT_TYPE_TO_CONFIG_MAPPING)
 
         # load the config
         config = PEFT_TYPE_TO_CONFIG_MAPPING[PeftConfig.from_pretrained(model_id).peft_type].from_pretrained(model_id)
@@ -304,11 +299,15 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             batch_size = input_ids.shape[0]
             if attention_mask is not None:
                 # concat prompt attention mask
-                prefix_attention_mask = torch.ones(batch_size, self.peft_config.num_virtual_tokens).to(self.device)
+                prefix_attention_mask = torch.ones(batch_size, self.peft_config.num_virtual_tokens).to(
+                    self.device
+                )
                 attention_mask = torch.cat((prefix_attention_mask, attention_mask), dim=1)
 
             if kwargs.get("position_ids", None) is not None:
-                warnings.warn("Position ids are not supported for parameter efficient tuning. Ignoring position ids.")
+                warnings.warn(
+                    "Position ids are not supported for parameter efficient tuning. Ignoring position ids."
+                )
                 kwargs["position_ids"] = None
             if kwargs.get("token_type_ids", None) is not None:
                 warnings.warn(
@@ -333,16 +332,17 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                     inputs_embeds = self.word_embeddings(input_ids)
                 # concat prompt labels
                 if labels is not None:
-                    prefix_labels = torch.full((batch_size, self.peft_config.num_virtual_tokens), -100).to(self.device)
+                    prefix_labels = torch.full((batch_size, self.peft_config.num_virtual_tokens), -100).to(
+                        self.device
+                    )
                     labels = torch.cat((prefix_labels, labels), dim=1)
                     kwargs["labels"] = labels
                 prompts = self.get_prompt(batch_size=batch_size)
                 prompts = prompts.to(inputs_embeds.dtype)
                 inputs_embeds = torch.cat((prompts, inputs_embeds), dim=1)
-                outputs = self.base_model(
-                    inputs_embeds=inputs_embeds, labels=labels, attention_mask=attention_mask, **kwargs
-                )
+                outputs = self.base_model(inputs_embeds=inputs_embeds, **kwargs)
                 return outputs
+
 
     @contextmanager
     def disable_adapter(self):
