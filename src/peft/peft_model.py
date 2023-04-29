@@ -17,16 +17,19 @@ import inspect
 import os
 import warnings
 from contextlib import contextmanager
+from typing import List, Optional, Tuple
 
 import torch
+import torch.nn as nn
 from accelerate import dispatch_model, infer_auto_device_map
 from accelerate.hooks import AlignDevicesHook, add_hook_to_module, remove_hook_from_submodules
 from accelerate.utils import get_balanced_memory
 from huggingface_hub import hf_hub_download
+from models.multitask_model import XLMRobertaForMultiTaskSequenceClassification
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
-from transformers.utils import PushToHubMixin
+from transformers.utils import ModelOutput, PushToHubMixin
 
 from .tuners import LoraModel, PrefixEncoder, PromptEmbedding, PromptEncoder
 from .utils import (
@@ -41,6 +44,17 @@ from .utils import (
     set_peft_model_state_dict,
     shift_tokens_right,
 )
+
+
+class CustomOutput(ModelOutput):
+    loss: Optional[torch.FloatTensor] = None
+    src_task_loss: Optional[torch.FloatTensor] = None
+    lang_detect_loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
+    lang_detect_logits: torch.FloatTensor = None
+    lang_detect_labels: torch.FloatTensor = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
 class PeftModel(PushToHubMixin, torch.nn.Module):
@@ -307,7 +321,7 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         **kwargs,
     ):
         if not isinstance(self.peft_config, PromptLearningConfig):
-            return self.base_model(
+            base_model_outs = self.base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 inputs_embeds=inputs_embeds,
@@ -317,6 +331,7 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
                 return_dict=return_dict,
                 **kwargs,
             )
+            return base_model_outs
 
         batch_size = input_ids.shape[0]
         if attention_mask is not None:
@@ -414,9 +429,264 @@ class PeftModelForSequenceClassification(PeftModel):
         params: 370178 || all params: 108680450 || trainable%: 0.3406113979101117
     """
 
+    def __init__(self, model, peft_config: PeftConfig, langs: List[int] = [], lang_loss_alpha: float = 1.0):
+        super().__init__(model, peft_config)
+        self.modules_to_save = ["classifiers", "score", "lang_detect_score"]
+
+        for name, _ in self.base_model.named_children():
+            if any(module_name in name for module_name in self.modules_to_save):
+                self.cls_layer_name = name
+                break
+
+        self.n_langs = len(langs)
+        self.langs = langs
+        if len(langs) > 0:
+            self.lang_dectect_dense = nn.Linear(model.config.hidden_size, len(langs), bias=True)
+        self.lang_loss_alpha = lang_loss_alpha
+
+        # to make sure classifier layer is trainable
+        _set_trainable(self)
+
+    def set_langs(self, langs: List[str], lang_loss_alpha: float):
+        self.n_langs = len(langs)
+        self.langs = langs
+        self.lang_loss_alpha = lang_loss_alpha
+        if len(langs) > 0:
+            self.lang_dectect_dense = nn.Linear(self.base_model.config.hidden_size, len(langs), bias=True)
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        tgt_input_ids=None,
+        tgt_attention_mask=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        **kwargs,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if not isinstance(self.peft_config, PromptLearningConfig) and isinstance(
+            self.model, XLMRobertaForMultiTaskSequenceClassification
+        ):
+            return self.base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                tgt_input_ids=tgt_input_ids,
+                tgt_attention_mask=tgt_attention_mask,
+                labels=labels,
+                output_attentions=output_attentions,
+                output_hidden_states=None if self.n_langs == 0 else True,
+                return_dict=return_dict,
+                **kwargs,
+            )
+        elif not isinstance(self.peft_config, PromptLearningConfig):
+            return self.base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                output_attentions=output_attentions,
+                output_hidden_states=None if self.n_langs == 0 else True,
+                return_dict=return_dict,
+                **kwargs,
+            )
+
+        # if self.n_langs == 0:
+        #     return CustomOutput(
+        #         loss=outs.loss,
+        #         logits=outs.logits,
+        #         lang_detect_logits=outs.hiddenstates,
+        #     )
+
+        # src_loss = outs.loss
+        # src_logits = outs.logits
+        # src_hidden_states = outs["hidden_states"][-1][
+        #     :, 0, :
+        # ]  # src lang bos hidden_states of the last layer
+
+        # outs = self.base_model(
+        #     input_ids=tgt_input_ids,
+        #     attention_mask=tgt_attention_mask,
+        #     output_hidden_states=True,
+        #     return_dict=return_dict,
+        # )  # get hidden_states of tgt lang
+        # tgt_hidden_states = outs["hidden_states"][-1][
+        #     :, 0, :
+        # ]  # tgt lang bos hidden_states of the last layer
+        # del outs
+
+        # # cal lang detect loss
+        # src_lang_logits = self.lang_dectect_dense(src_hidden_states)
+        # tgt_lang_logits = self.lang_dectect_dense(tgt_hidden_states)
+        # lang_logits = torch.cat((src_lang_logits, tgt_lang_logits))
+        # del src_lang_logits, tgt_lang_logits
+
+        # src_lang_labels = torch.tensor([0 for _ in range(len(input_ids))], dtype=labels.dtype)
+        # tgt_lang_labels = torch.tensor([1 for _ in range(len(tgt_input_ids))], dtype=labels.dtype)
+        # lang_labels = torch.cat((src_lang_labels, tgt_lang_labels)).to(device=labels.device)
+        # loss_fnt = CrossEntropyLoss()
+        # lang_loss = loss_fnt(lang_logits, lang_labels)
+
+        # loss = src_loss - self.lang_loss_alpha * lang_loss
+        # return CustomOutput(
+        #     loss=loss,
+        #     src_task_loss=src_loss,
+        #     lang_detect_loss=lang_loss,
+        #     logits=src_logits,
+        #     lang_detect_logits=lang_logits,
+        #     lang_detect_labels=lang_labels,
+        # )
+
+        batch_size = input_ids.shape[0]
+        if attention_mask is not None:
+            # concat prompt attention mask
+            prefix_attention_mask = torch.ones(batch_size, self.peft_config.num_virtual_tokens).to(
+                self.device
+            )
+            attention_mask = torch.cat((prefix_attention_mask, attention_mask), dim=1)
+        if kwargs.get("position_ids", None) is not None:
+            warnings.warn(
+                "Position ids are not supported for parameter efficient tuning. Ignoring position ids."
+            )
+            kwargs["position_ids"] = None
+        kwargs.update(
+            {
+                "attention_mask": attention_mask,
+                "labels": labels,
+                "output_attentions": output_attentions,
+                "output_hidden_states": output_hidden_states,
+                "return_dict": return_dict,
+            }
+        )
+
+        if self.peft_config.peft_type == PeftType.PREFIX_TUNING:
+            return self._prefix_tuning_forward(input_ids=input_ids, **kwargs)
+        else:
+            if kwargs.get("token_type_ids", None) is not None:
+                kwargs["token_type_ids"] = torch.cat(
+                    (
+                        torch.zeros(batch_size, self.peft_config.num_virtual_tokens).to(self.device),
+                        kwargs["token_type_ids"],
+                    ),
+                    dim=1,
+                ).long()
+            if inputs_embeds is None:
+                inputs_embeds = self.word_embeddings(input_ids)
+            prompts = self.get_prompt(batch_size=batch_size)
+            prompts = prompts.to(inputs_embeds.dtype)
+            inputs_embeds = torch.cat((prompts, inputs_embeds), dim=1)
+            return self.base_model(inputs_embeds=inputs_embeds, **kwargs)
+
+    def _prefix_tuning_forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        **kwargs,
+    ):
+        batch_size = input_ids.shape[0]
+        past_key_values = self.get_prompt(batch_size)
+        fwd_params = list(inspect.signature(self.base_model.forward).parameters.keys())
+        kwargs.update(
+            {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "inputs_embeds": inputs_embeds,
+                "output_attentions": output_attentions,
+                "output_hidden_states": output_hidden_states,
+                "return_dict": return_dict,
+                "past_key_values": past_key_values,
+            }
+        )
+        if "past_key_values" in fwd_params:
+            return self.base_model(labels=labels, **kwargs)
+        else:
+            transformer_backbone_name = self.base_model.get_submodule(self.transformer_backbone_name)
+            fwd_params = list(inspect.signature(transformer_backbone_name.forward).parameters.keys())
+            if "past_key_values" not in fwd_params:
+                raise ValueError(
+                    "Model does not support past key values which are required for prefix tuning."
+                )
+            outputs = transformer_backbone_name(**kwargs)
+            pooled_output = outputs[1] if len(outputs) > 1 else outputs[0]
+            if "dropout" in [name for name, _ in list(self.base_model.named_children())]:
+                pooled_output = self.base_model.dropout(pooled_output)
+            logits = self.base_model.get_submodule(self.cls_layer_name)(pooled_output)
+
+            loss = None
+            if labels is not None:
+                if self.config.problem_type is None:
+                    if self.base_model.num_labels == 1:
+                        self.config.problem_type = "regression"
+                    elif self.base_model.num_labels > 1 and (
+                        labels.dtype == torch.long or labels.dtype == torch.int
+                    ):
+                        self.config.problem_type = "single_label_classification"
+                    else:
+                        self.config.problem_type = "multi_label_classification"
+
+                if self.config.problem_type == "regression":
+                    loss_fct = MSELoss()
+                    if self.base_model.num_labels == 1:
+                        loss = loss_fct(logits.squeeze(), labels.squeeze())
+                    else:
+                        loss = loss_fct(logits, labels)
+                elif self.config.problem_type == "single_label_classification":
+                    loss_fct = CrossEntropyLoss()
+                    loss = loss_fct(logits.view(-1, self.base_model.num_labels), labels.view(-1))
+                elif self.config.problem_type == "multi_label_classification":
+                    loss_fct = BCEWithLogitsLoss()
+                    loss = loss_fct(logits, labels)
+            if not return_dict:
+                output = (logits,) + outputs[2:]
+                return ((loss,) + output) if loss is not None else output
+
+            return SequenceClassifierOutput(
+                loss=loss,
+                logits=logits,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
+
+
+class PeftModelForBase(PeftModel):
+    """
+    Peft model for base model.
+
+    Args:
+        model ([`PreTrainedModel`]): Base transformer model
+        peft_config ([`PeftConfig`]): Peft config.
+
+    **Attributes**:
+        - **config** ([`PretrainedConfig`]) -- The configuration object of the base model.
+        - **cls_layer_name** (`str`) -- The name of the classification layer.
+
+    Example::
+
+        >>> from transformers import AutoModelForSequenceClassification >>> from peft import
+        PeftModelForSequenceClassification, get_peft_config >>> config = {
+                'peft_type': 'PREFIX_TUNING', 'task_type': 'SEQ_CLS', 'inference_mode': False, 'num_virtual_tokens':
+                20, 'token_dim': 768, 'num_transformer_submodules': 1, 'num_attention_heads': 12, 'num_layers': 12,
+                'encoder_hidden_size': 768, 'prefix_projection': False, 'postprocess_past_key_value_function': None
+            }
+        >>> peft_config = get_peft_config(config) >>> model =
+        AutoModelForSequenceClassification.from_pretrained("bert-base-cased") >>> peft_model =
+        PeftModelForSequenceClassification(model, peft_config) >>> peft_model.print_trainable_parameters() trainable
+        params: 370178 || all params: 108680450 || trainable%: 0.3406113979101117
+    """
+
     def __init__(self, model, peft_config: PeftConfig):
         super().__init__(model, peft_config)
-        self.modules_to_save = ["classifier", "score"]
+        self.modules_to_save = ["score"]
 
         for name, _ in self.base_model.named_children():
             if any(module_name in name for module_name in self.modules_to_save):
@@ -431,7 +701,8 @@ class PeftModelForSequenceClassification(PeftModel):
         input_ids=None,
         attention_mask=None,
         inputs_embeds=None,
-        labels=None,
+        tgt_input_ids=None,
+        tgt_attention_mask=None,
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
@@ -444,9 +715,8 @@ class PeftModelForSequenceClassification(PeftModel):
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 inputs_embeds=inputs_embeds,
-                labels=labels,
                 output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
+                output_hidden_states=True,
                 return_dict=return_dict,
                 **kwargs,
             )
@@ -466,7 +736,6 @@ class PeftModelForSequenceClassification(PeftModel):
         kwargs.update(
             {
                 "attention_mask": attention_mask,
-                "labels": labels,
                 "output_attentions": output_attentions,
                 "output_hidden_states": output_hidden_states,
                 "return_dict": return_dict,

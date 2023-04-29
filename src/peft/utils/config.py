@@ -36,6 +36,7 @@ class TaskType(str, enum.Enum):
     SEQ_2_SEQ_LM = "SEQ_2_SEQ_LM"
     CAUSAL_LM = "CAUSAL_LM"
     TOKEN_CLS = "TOKEN_CLS"
+    BASE = "BASE"
 
 
 @dataclass
@@ -136,7 +137,9 @@ class PeftConfig(PeftConfigMixin):
         inference_mode (`bool`, defaults to `False`): Whether to use the Peft model in inference mode.
     """
 
-    base_model_name_or_path: str = field(default=None, metadata={"help": "The name of the base model to use."})
+    base_model_name_or_path: str = field(
+        default=None, metadata={"help": "The name of the base model to use."}
+    )
     peft_type: Union[str, PeftType] = field(default=None, metadata={"help": "Peft type"})
     task_type: Union[str, TaskType] = field(default=None, metadata={"help": "Task type"})
     inference_mode: bool = field(default=False, metadata={"help": "Whether to use inference mode"})

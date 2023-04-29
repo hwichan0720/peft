@@ -15,6 +15,7 @@
 
 from .peft_model import (
     PeftModel,
+    PeftModelForBase,
     PeftModelForCausalLM,
     PeftModelForSeq2SeqLM,
     PeftModelForSequenceClassification,
@@ -23,12 +24,12 @@ from .peft_model import (
 from .tuners import LoraConfig, PrefixTuningConfig, PromptEncoderConfig, PromptTuningConfig
 from .utils import PromptLearningConfig
 
-
 MODEL_TYPE_TO_PEFT_MODEL_MAPPING = {
     "SEQ_CLS": PeftModelForSequenceClassification,
     "SEQ_2_SEQ_LM": PeftModelForSeq2SeqLM,
     "CAUSAL_LM": PeftModelForCausalLM,
     "TOKEN_CLS": PeftModelForTokenClassification,
+    "BASE": PeftModelForBase,
 }
 
 PEFT_TYPE_TO_CONFIG_MAPPING = {
@@ -117,7 +118,9 @@ def _prepare_lora_config(peft_config, model_config):
     if peft_config.target_modules is None:
         if model_config["model_type"] not in TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING:
             raise ValueError("Please specify `target_modules` in `peft_config`")
-        peft_config.target_modules = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING[model_config["model_type"]]
+        peft_config.target_modules = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING[
+            model_config["model_type"]
+        ]
     if len(peft_config.target_modules) == 1:
         peft_config.fan_in_fan_out = True
         peft_config.enable_lora = [True, False, True]
